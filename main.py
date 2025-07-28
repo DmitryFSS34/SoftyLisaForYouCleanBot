@@ -1,82 +1,81 @@
 import os
 import asyncio
-import logging
+import openai
 import requests
-from openai import AsyncOpenAI
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import FSInputFile
+from aiogram.types import Message, FSInputFile
+from aiogram import types
 
-# Настройка логов
-logging.basicConfig(level=logging.INFO)
-
-# Токены и ключи
+# Загрузка переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")
+ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")  # можно не менять
 
-# Инициализация клиентов
+# Конфигурация
 bot = Bot(token=BOT_TOKEN, default=types.DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# Генерация речи через ElevenLabs
-def generate_voice(text: str, voice_id: str = ELEVENLABS_VOICE_ID) -> str:
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+openai.api_key = OPENAI_API_KEY
+
+USE_VOICE_REPLY = {}
+
+async def generate_gpt_reply(prompt: str) -> str:
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    chat_completion = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.9,
+    )
+    return chat_completion.choices[0].message.content
+
+async def generate_voice(text: str, filename="response.mp3"):
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
     headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
+        "xi-api-key": ELEVEN_API_KEY,
         "Content-Type": "application/json"
     }
     payload = {
         "text": text,
-        "model_id": "eleven_monolingual_v1",
+        "model_id": "eleven_multilingual_v2",
         "voice_settings": {
-            "stability": 0.45,
-            "similarity_boost": 0.8
+            "stability": 0.5,
+            "similarity_boost": 0.75
         }
     }
     response = requests.post(url, json=payload, headers=headers)
     if response.status_code == 200:
-        filepath = "voice_response.mp3"
-        with open(filepath, "wb") as f:
+        with open(filename, "wb") as f:
             f.write(response.content)
-        return filepath
+        return filename
     else:
-        raise Exception("Failed to generate voice")
+        raise Exception(f"Voice generation failed: {response.text}")
 
-# Генерация ответа через ChatGPT
-async def generate_reply(prompt: str) -> str:
-    chat_completion = await openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.9
-    )
-    return chat_completion.choices[0].message.content.strip()
+@dp.message(F.text.lower() == "говори голосом")
+async def enable_voice(message: Message):
+    USE_VOICE_REPLY[message.from_user.id] = True
+    await message.answer("Хорошо, теперь я буду отвечать голосом 💋")
 
-# Обработчик текстовых сообщений
-@dp.message(F.text)
-async def handle_message(message: types.Message):
-    user_input = message.text.strip()
+@dp.message()
+async def handle_message(message: Message):
+    user_id = message.from_user.id
+    prompt = message.text
 
-    is_voice = user_input.lower().startswith("голос:")
-    prompt = user_input[6:].strip() if is_voice else user_input
+    # Генерация текста
+    reply_text = await generate_gpt_reply(prompt)
 
-    try:
-        reply = await generate_reply(prompt)
+    # Ответ голосом, если включен
+    if USE_VOICE_REPLY.get(user_id):
+        try:
+            filename = await generate_voice(reply_text)
+            voice_file = FSInputFile(filename)
+            await message.answer_voice(voice_file)
+        except Exception as e:
+            await message.answer("Ошибка при генерации голоса 😢")
+    else:
+        await message.answer(reply_text)
 
-        if is_voice:
-            audio_file_path = generate_voice(reply)
-            voice = FSInputFile(audio_file_path)
-            await message.answer_voice(voice)
-        else:
-            await message.answer(reply)
-
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        await message.answer("⚠️ Упс, что-то пошло не так...")
-
-# Старт бота
 async def main():
     await dp.start_polling(bot)
 
